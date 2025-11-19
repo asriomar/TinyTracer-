@@ -50,7 +50,7 @@ const App: React.FC = () => {
       )}
 
       <footer className="mt-auto py-6 text-center text-gray-400 text-sm">
-        <p>© {new Date().getFullYear()} TinyTracers • Powered by Gemini AI</p>
+        <p>© {new Date().getFullYear()} TinyTracers • Fun Learning Game</p>
       </footer>
     </div>
   );
