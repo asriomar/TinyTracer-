@@ -1,6 +1,7 @@
 
-import React, { useRef, useLayoutEffect, useState } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { Eraser, Check, ArrowLeft } from 'lucide-react';
+import { analyzeHandwriting } from '../services/gemini';
 import { saveProgress } from '../services/storage';
 import { playSound } from '../services/audio';
 import { LessonItem, AIResponse, LessonType } from '../types';
@@ -56,110 +57,92 @@ class Particle {
 export const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ currentItem, lessonType, onBack, onNext }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const confettiRef = useRef<HTMLCanvasElement>(null);
-  
   const [isDrawing, setIsDrawing] = useState(false);
   const [strokeColor, setStrokeColor] = useState('#3b82f6');
-  const [lineWidth] = useState(20);
+  const [lineWidth] = useState(20); // Thicker line for kids
   const [feedback, setFeedback] = useState<AIResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [hasDrawn, setHasDrawn] = useState(false);
 
-  // Refs to access latest state inside event listeners without re-binding
-  const stylesRef = useRef({ strokeColor, lineWidth });
-
-  // Keep refs synced with state and update context if needed
-  useLayoutEffect(() => {
-    stylesRef.current = { strokeColor, lineWidth };
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext('2d');
-    if (canvas && ctx) {
-        const dpr = window.devicePixelRatio || 1;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.strokeStyle = strokeColor;
-        // Scale line width by DPR so it looks consistently thick on all screens
-        ctx.lineWidth = lineWidth * dpr; 
-    }
-  }, [strokeColor, lineWidth]);
-
-  // Helper: Setup Canvas Resolution (Physical Pixels)
-  const setupCanvas = () => {
+  // 1. Handle Canvas Sizing & Responsiveness
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const rect = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    
-    // Avoid updating if rect is invalid (e.g. hidden)
-    if (rect.width === 0 || rect.height === 0) return;
-
-    const targetWidth = Math.round(rect.width * dpr);
-    const targetHeight = Math.round(rect.height * dpr);
-
-    // Only resize if dimensions actually changed
-    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
-        canvas.width = targetWidth;
-        canvas.height = targetHeight;
+    const updateCanvasSize = () => {
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
         
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-            // NO ctx.scale() here! We map coordinates manually.
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            ctx.strokeStyle = stylesRef.current.strokeColor;
-            ctx.lineWidth = stylesRef.current.lineWidth * dpr;
+        // Check if resolution needs update (allow small tolerance)
+        if (Math.abs(canvas.width - rect.width * dpr) > 5 || Math.abs(canvas.height - rect.height * dpr) > 5) {
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            
+            // Re-apply context settings after resize (resize clears context)
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+                ctx.scale(dpr, dpr);
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.strokeStyle = strokeColor;
+                ctx.lineWidth = lineWidth;
+            }
         }
-    }
-  };
+    };
 
-  // Helper: Clear Content
-  const clearCanvasContent = () => {
-      const canvas = canvasRef.current;
-      const ctx = canvas?.getContext('2d');
-      if (canvas && ctx) {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-      }
-  };
+    // Initial sizing
+    updateCanvasSize();
 
-  // Setup Effect: Resize Handling & Initial Clear
-  useLayoutEffect(() => {
-    // 1. Initial Setup
-    setupCanvas();
-    clearCanvasContent();
-    
-    // 2. Observer for layout shifts
+    // Use ResizeObserver for robust detection of layout changes (fixes first load bug)
     const resizeObserver = new ResizeObserver(() => {
-        setupCanvas();
+        updateCanvasSize();
     });
-    if (canvasRef.current) {
-        resizeObserver.observe(canvasRef.current);
-    }
+    resizeObserver.observe(canvas);
 
-    // 3. Fallback check for first-render layout jank
-    const rafId = requestAnimationFrame(() => setupCanvas());
-
-    // 4. Clear Confetti
-    if (confettiRef.current) {
-      const cCtx = confettiRef.current.getContext('2d');
-      cCtx?.clearRect(0, 0, confettiRef.current.width, confettiRef.current.height);
-    }
-
-    // Reset State
-    setFeedback(null);
-    setHasDrawn(false);
-    setIsLoading(false);
-    speakItem();
+    // Fallback: Force a check after a slight delay to catch end of animations
+    const timeoutId = setTimeout(updateCanvasSize, 100);
 
     return () => {
         resizeObserver.disconnect();
-        cancelAnimationFrame(rafId);
+        clearTimeout(timeoutId);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentItem]); 
+  }, []); // Run once on mount + observer handles the rest
+
+  // 2. Sync Stroke Styles when user changes them
+  useEffect(() => {
+    const ctx = canvasRef.current?.getContext('2d');
+    if (ctx) {
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = lineWidth;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+    }
+  }, [strokeColor, lineWidth]);
+
+  // 3. Handle New Lesson Item Loading
+  useEffect(() => {
+    setFeedback(null);
+    setHasDrawn(false);
+    
+    // Clear drawing area
+    const canvas = canvasRef.current;
+    if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+             ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+    }
+
+    speakItem();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentItem, lessonType]);
 
   const speakItem = () => {
     if ('speechSynthesis' in window) {
+      // Cancel any ongoing speech to avoid queue buildup
       window.speechSynthesis.cancel();
+
       let text = currentItem.char;
       if (lessonType === LessonType.NUMBERS) {
         text = `Number ${currentItem.word}`;
@@ -175,48 +158,8 @@ export const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ currentItem, lesso
     }
   };
 
-  // CRITICAL: Map screen coordinates to canvas buffer coordinates
-  const getCoordinates = (e: React.MouseEvent | React.TouchEvent) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return { x: 0, y: 0 };
-    
-    const rect = canvas.getBoundingClientRect();
-    let clientX, clientY;
-    
-    if ('touches' in e) {
-      clientX = e.touches[0].clientX;
-      clientY = e.touches[0].clientY;
-    } else {
-      clientX = (e as React.MouseEvent).clientX;
-      clientY = (e as React.MouseEvent).clientY;
-    }
-
-    // Calculate ratio of Buffer Pixels to CSS Pixels
-    // This guarantees the drawing is always under the cursor, even if the
-    // resolution hasn't fully updated or is different from the display size.
-    const scaleX = rect.width > 0 ? canvas.width / rect.width : 1;
-    const scaleY = rect.height > 0 ? canvas.height / rect.height : 1;
-
-    return {
-      x: (clientX - rect.left) * scaleX,
-      y: (clientY - rect.top) * scaleY
-    };
-  };
-
   const startDrawing = (e: React.MouseEvent | React.TouchEvent) => {
     if (feedback) return;
-    
-    // Safety check: If canvas resolution is stale (e.g. first load glitch), fix it now.
-    // This might clear the canvas, but since we are just starting a stroke, it's safe.
-    const canvas = canvasRef.current;
-    if (canvas) {
-        const rect = canvas.getBoundingClientRect();
-        const dpr = window.devicePixelRatio || 1;
-        if (canvas.width !== Math.round(rect.width * dpr)) {
-            setupCanvas();
-        }
-    }
-    
     setIsDrawing(true);
     setHasDrawn(true);
     const { x, y } = getCoordinates(e);
@@ -230,7 +173,9 @@ export const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ currentItem, lesso
 
   const draw = (e: React.MouseEvent | React.TouchEvent) => {
     if (!isDrawing || feedback) return;
-    if (e.cancelable) e.preventDefault(); // Block scrolling on touch
+    if (e.cancelable && e.type !== 'mousedown' && e.type !== 'mousemove') {
+         e.preventDefault(); // Prevent scrolling only on touch
+    }
     
     const { x, y } = getCoordinates(e);
     const ctx = canvasRef.current?.getContext('2d');
@@ -247,9 +192,38 @@ export const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ currentItem, lesso
     if (ctx) ctx.closePath();
   };
 
+  const getCoordinates = (e: React.MouseEvent | React.TouchEvent) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    
+    let clientX, clientY;
+    if ('touches' in e) {
+      clientX = e.touches[0].clientX;
+      clientY = e.touches[0].clientY;
+    } else {
+      clientX = (e as React.MouseEvent).clientX;
+      clientY = (e as React.MouseEvent).clientY;
+    }
+
+    return {
+      x: clientX - rect.left,
+      y: clientY - rect.top
+    };
+  };
+
   const clearCanvas = () => {
     playSound('pop');
-    clearCanvasContent();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      // Use width/height to clear everything regardless of transforms
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
     setFeedback(null);
     setHasDrawn(false);
   };
@@ -285,37 +259,53 @@ export const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ currentItem, lesso
     animate();
   };
 
-  const checkWork = () => {
+  const checkWork = async () => {
     if (!canvasRef.current || !hasDrawn) return;
 
     setIsLoading(true);
+    try {
+        const canvas = canvasRef.current;
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = canvas.width;
+        tempCanvas.height = canvas.height;
+        const tCtx = tempCanvas.getContext('2d');
+        
+        if (tCtx) {
+            tCtx.fillStyle = '#FFFFFF';
+            tCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+            tCtx.drawImage(canvas, 0, 0);
+            
+            const imageBase64 = tempCanvas.toDataURL('image/png');
+            const result = await analyzeHandwriting(imageBase64, currentItem.char, lessonType);
+            
+            setFeedback(result);
 
-    setTimeout(() => {
-        let funFact = "";
-        if (lessonType === LessonType.NUMBERS) {
-            funFact = `You wrote the number ${currentItem.word}!`;
-        } else {
-            funFact = `${currentItem.char} is for ${currentItem.word}!`;
+            if (result.success) {
+                saveProgress(currentItem.char, result.stars);
+                playSound('success');
+                if (result.stars === 3) {
+                    fireConfetti();
+                }
+                if ('speechSynthesis' in window) {
+                    setTimeout(() => {
+                        const synth = new SpeechSynthesisUtterance(result.message);
+                        window.speechSynthesis.speak(synth);
+                    }, 500);
+                }
+            } else {
+                playSound('error');
+            }
         }
-
-        const result: AIResponse = {
-            success: true,
-            stars: 3,
-            message: "Great job!",
-            funFact: funFact
-        };
-
-        setFeedback(result);
-        saveProgress(currentItem.char, result.stars);
-        playSound('success');
-        fireConfetti();
-
-        if ('speechSynthesis' in window) {
-             const synth = new SpeechSynthesisUtterance(`Great job! ${funFact}`);
-             window.speechSynthesis.speak(synth);
-        }
-        setIsLoading(false);
-    }, 600);
+    } catch (error) {
+      console.error(error);
+      setFeedback({
+        success: false,
+        message: "Oops, something went wrong. Try again!",
+        stars: 0
+      });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -391,7 +381,7 @@ export const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ currentItem, lesso
         {isLoading && (
             <div className="absolute inset-0 bg-white/80 z-50 flex items-center justify-center rounded-[2rem] backdrop-blur-sm transition-all">
                 <div className="flex flex-col items-center animate-bounce">
-                    <div className="text-4xl mb-2">⭐</div>
+                    <div className="text-4xl mb-2">✏️</div>
                     <p className="text-blue-600 font-bold text-xl">Checking...</p>
                 </div>
             </div>
@@ -401,10 +391,10 @@ export const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ currentItem, lesso
         {feedback && (
             <div className="absolute inset-0 bg-white/95 z-50 flex flex-col items-center justify-center rounded-[2rem] p-6 text-center animate-in zoom-in duration-300">
                 <div className="text-7xl mb-4 drop-shadow-md">
-                    🌟
+                    {feedback.success ? (feedback.stars === 3 ? '🌟' : '🙂') : '🤔'}
                 </div>
                 
-                <h3 className="text-2xl font-bold mb-2 text-green-600">
+                <h3 className={`text-2xl font-bold mb-2 ${feedback.success ? 'text-green-600' : 'text-orange-500'}`}>
                     {feedback.message}
                 </h3>
 
@@ -440,12 +430,14 @@ export const DrawingCanvas: React.FC<DrawingCanvasProps> = ({ currentItem, lesso
                     >
                         Try Again
                     </button>
-                    <button 
-                        onClick={() => { playSound('pop'); onNext(); }}
-                        className="flex-1 py-3 rounded-xl font-bold bg-blue-500 text-white hover:bg-blue-600 shadow-[0_4px_0_0_rgba(37,99,235,1)] active:translate-y-1 active:shadow-none transition-all"
-                    >
-                        Next ➜
-                    </button>
+                    {feedback.success && (
+                         <button 
+                            onClick={() => { playSound('pop'); onNext(); }}
+                            className="flex-1 py-3 rounded-xl font-bold bg-blue-500 text-white hover:bg-blue-600 shadow-[0_4px_0_0_rgba(37,99,235,1)] active:translate-y-1 active:shadow-none transition-all"
+                        >
+                            Next ➜
+                        </button>
+                    )}
                 </div>
             </div>
         )}

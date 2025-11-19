@@ -1,5 +1,5 @@
 {
-  "name": "TinyTracers: Alphabet and Numbers",
-  "description": "A fun, interactive game for children to learn writing the alphabet. ",
+  "name": "TinyTracers: AI Alphabet and Numbers",
+  "description": "A fun, interactive game for children to learn writing the alphabet. Features a drawing canvas for practice and AI-powered feedback using Gemini to grade handwriting and teach new words.",
   "requestFramePermissions": []
 }
